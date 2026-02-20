@@ -1,0 +1,7 @@
+services:
+  app:
+    image: ghcr.io/amiller/devproof-toy@sha256:REPLACE_WITH_DIGEST
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
