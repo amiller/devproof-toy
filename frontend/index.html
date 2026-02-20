@@ -23,6 +23,15 @@
   a { color: #47e }
   .check { color: #2a2 } .fail { color: #c22 }
   .nav { display: flex; gap: 1rem; font-size: .85rem; margin-top: .5rem }
+  .records { margin-top: .5rem }
+  .record { display: flex; gap: .5rem; padding: .4rem 0; border-bottom: 1px solid #f0f0f0; font-size: .85rem; cursor: pointer }
+  .record:hover { background: #fafafa }
+  .record .k { font-weight: 600; min-width: 100px }
+  .record .v { color: #666; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+  .record .cipher { color: #bbb; font-size: .75rem; font-family: monospace }
+  .quick { display: flex; gap: .5rem; flex-wrap: wrap; margin: .5rem 0 }
+  .quick button { background: #f0f0f0; color: #222; font-size: .8rem; padding: .3rem .6rem }
+  .quick button:hover { background: #e0e0e0 }
 </style>
 </head><body>
 
@@ -36,7 +45,18 @@
 
 <div class="stats" id="globalStats"></div>
 
-<h2>Store a value</h2>
+<div class="quick">
+  <button onclick="storeRandom()">Store a random secret</button>
+  <button onclick="storeBtcPrice()">Store BTC price</button>
+  <button onclick="storeTimestamp()">Store timestamp</button>
+</div>
+
+<h2>Your records</h2>
+<div class="records" id="recordsList"><span class="sub">Loading...</span></div>
+
+<hr class="sep">
+
+<h2>Store / Lookup</h2>
 <div class="row">
   <input type="text" id="recKey" placeholder="key">
   <input type="text" id="recValue" placeholder="value">
@@ -44,14 +64,13 @@
 <div class="row">
   <button onclick="storeRecord()" style="flex:1">Store</button>
   <button onclick="lookupRecord()" style="flex:1;background:#555">Lookup</button>
-  <button onclick="listAllRecords()" style="flex:1;background:#888">List All</button>
 </div>
 <pre id="recResult" style="display:none"></pre>
 
 <hr class="sep">
 
-<h2>Fetch a URL through the TEE</h2>
-<p class="sub">HTTPS fetch with TLS fingerprint capture, signed by the enclave.</p>
+<h2>TLS Oracle</h2>
+<p class="sub">Fetch any HTTPS URL through the TEE with signed attestation.</p>
 <div class="row">
   <input type="text" id="targetUrl" value="https://api.coinbase.com/v2/prices/BTC-USD/spot">
   <button id="fetchBtn" onclick="doFetch()">Fetch</button>
@@ -77,6 +96,11 @@ let token = null
 const cvm = () => document.getElementById('cvmUrl').value
 const show = (data) => { const el = document.getElementById('recResult'); el.style.display = 'block'; el.textContent = JSON.stringify(data, null, 2) }
 
+const adjectives = ['secret','hidden','private','encrypted','sealed','classified','covert','arcane']
+const nouns = ['message','note','password','key','token','code','cipher','memo']
+const phrases = ['the eagle has landed','trust no one','42 is the answer','all your base','hello world','rosebud','open sesame','the cake is a lie']
+const pick = arr => arr[Math.floor(Math.random() * arr.length)]
+
 ;(async () => {
   let res = await fetch('/api/session', { credentials: 'include' })
   if (!res.ok) res = await fetch('/api/session', { method: 'POST', credentials: 'include' })
@@ -84,6 +108,7 @@ const show = (data) => { const el = document.getElementById('recResult'); el.sty
   document.getElementById('sessionStatus').textContent = `session ${d.userId}`
   token = (await (await fetch('/api/token', { method: 'POST' })).json()).token
   refreshStats()
+  refreshRecords()
 })()
 
 async function refreshStats() {
@@ -96,23 +121,55 @@ async function refreshStats() {
   } catch {}
 }
 
+async function refreshRecords() {
+  try {
+    const res = await fetch('/api/records', { credentials: 'include' })
+    const d = await res.json()
+    const el = document.getElementById('recordsList')
+    if (!d.records?.length) { el.innerHTML = '<span class="sub">No records yet. Try storing one!</span>'; return }
+    el.innerHTML = d.records.map(r =>
+      `<div class="record" onclick="document.getElementById('recKey').value='${r.key}';lookupRecord()">` +
+      `<span class="k">${r.key}</span>` +
+      `<span class="cipher">${r.ciphertext.substring(0, 40)}...</span>` +
+      `</div>`
+    ).join('')
+  } catch {}
+}
+
+async function doStore(key, value) {
+  await fetch('/api/records', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, value }) })
+  refreshStats()
+  refreshRecords()
+  document.getElementById('recKey').value = key
+  document.getElementById('recValue').value = value
+  // auto-lookup to show the decrypted value
+  const res = await fetch(`/api/records?key=${encodeURIComponent(key)}`, { credentials: 'include' })
+  show(await res.json())
+}
+
+window.storeRandom = () => doStore(`${pick(adjectives)}-${pick(nouns)}`, pick(phrases))
+
+window.storeBtcPrice = async function() {
+  try {
+    const r = await fetch(`${cvm()}/fetch`, { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ url: 'https://api.coinbase.com/v2/prices/BTC-USD/spot' }) })
+    const d = await r.json()
+    const price = JSON.parse(d.body)?.data?.amount || d.body
+    doStore('btc-price', `$${price} @ ${d.timestamp}`)
+  } catch(e) { alert(e.message) }
+}
+
+window.storeTimestamp = () => doStore('timestamp', new Date().toISOString())
+
 window.storeRecord = async function() {
   const key = document.getElementById('recKey').value, value = document.getElementById('recValue').value
   if (!key) return
-  const res = await fetch('/api/records', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, value }) })
-  show(await res.json())
-  refreshStats()
+  await doStore(key, value)
 }
 
 window.lookupRecord = async function() {
   const key = document.getElementById('recKey').value
   if (!key) return
   const res = await fetch(`/api/records?key=${encodeURIComponent(key)}`, { credentials: 'include' })
-  show(await res.json())
-}
-
-window.listAllRecords = async function() {
-  const res = await fetch('/api/records', { credentials: 'include' })
   show(await res.json())
 }
 
@@ -148,7 +205,6 @@ async function verify(data) {
   el.innerHTML = checks.map(c => `<span class="${c.ok ? 'check' : 'fail'}" style="margin-right:.6rem">${c.ok ? '✓' : '✗'} ${c.label}${c.detail ? ' ' + c.detail : ''}</span>`).join('')
 }
 
-function parseSignature(h) { const b = hexToBytes(h); return { sig: b.slice(0, 64), recovery: b[64] || 0 } }
 function hexToBytes(h) { h = h.replace(/^0x/, ''); const b = new Uint8Array(h.length / 2); for (let i = 0; i < b.length; i++) b[i] = parseInt(h.substr(i * 2, 2), 16); return b }
 function bytesToHex(b) { return typeof b === 'string' ? b : Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2, '0')).join('') }
 </script>
