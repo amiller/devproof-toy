@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API Docs — Devproof</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0 }
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.6 }
+  h1 { font-size: 1.4rem; margin-bottom: .3rem }
+  h2 { font-size: 1.1rem; margin: 2rem 0 .5rem; color: #555; border-bottom: 1px solid #eee; padding-bottom: .3rem }
+  h3 { font-size: .95rem; margin: 1.2rem 0 .3rem }
+  p { font-size: .9rem; margin-bottom: .5rem }
+  code { background: #f0f0f0; padding: .1rem .3rem; border-radius: 3px; font-size: .85rem }
+  pre { background: #1a1a2e; color: #e0e0e0; padding: .8rem; border-radius: 6px; overflow-x: auto; font-size: .8rem; white-space: pre-wrap; word-break: break-all; user-select: all; margin: .3rem 0 .8rem }
+  pre .c { color: #6a6a8a }
+  a { color: #47e }
+  .tag { display: inline-block; font-size: .7rem; padding: .15rem .4rem; border-radius: 3px; font-weight: 600; margin-right: .3rem }
+  .tag.post { background: #d4edda; color: #155724 }
+  .tag.get { background: #cce5ff; color: #004085 }
+  .nav { font-size: .85rem; margin-bottom: 1rem }
+  table { width: 100%; border-collapse: collapse; font-size: .85rem; margin: .5rem 0 }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #eee }
+  th { color: #666; font-weight: 600 }
+</style>
+</head><body>
+
+<div class="nav"><a href="/">← Back to app</a></div>
+
+<h1>Devproof API</h1>
+<p>
+  Encrypted key-value store backed by a TEE. Values are AES-256-GCM encrypted inside a
+  <a href="https://github.com/amiller/devproof-toy" target="_blank">Trusted Execution Environment</a>
+  and stored in Postgres as ciphertext.
+</p>
+<p>Base URL: <code>https://devproof-toy.vercel.app</code></p>
+
+<h2>Authentication</h2>
+<p>
+  Sessions are cookie-based. Create a session first, then include cookies in subsequent requests.
+  No API keys or tokens needed for the KV store.
+</p>
+
+<h2>Endpoints</h2>
+
+<h3><span class="tag post">POST</span> <code>/api/session</code></h3>
+<p>Create an anonymous session. Sets an <code>httpOnly</code> cookie (7 day expiry).</p>
+<pre>curl -c cookies.txt -X POST https://devproof-toy.vercel.app/api/session
+<span class="c"># → {"userId":"user-a1b2c3d4e5f6a7b8"}</span></pre>
+
+<h3><span class="tag get">GET</span> <code>/api/session</code></h3>
+<p>Check current session.</p>
+<pre>curl -b cookies.txt https://devproof-toy.vercel.app/api/session
+<span class="c"># → {"userId":"user-a1b2c3d4e5f6a7b8"}
+# or 401 if no session</span></pre>
+
+<h3><span class="tag post">POST</span> <code>/api/records</code></h3>
+<p>Store a record. The value is encrypted inside the TEE before writing to Postgres.</p>
+<table>
+  <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+  <tr><td><code>key</code></td><td>string</td><td>Record key (unique per session)</td></tr>
+  <tr><td><code>value</code></td><td>string</td><td>Plaintext value (encrypted by TEE)</td></tr>
+</table>
+<pre>curl -b cookies.txt -X POST https://devproof-toy.vercel.app/api/records \
+  -H "Content-Type: application/json" \
+  -d '{"key":"my-secret","value":"hello world"}'
+<span class="c"># → {"ok":true,"key":"my-secret"}</span></pre>
+<p>Storing the same key again overwrites the previous value.</p>
+
+<h3><span class="tag get">GET</span> <code>/api/records?key=...</code></h3>
+<p>Read a single record. The TEE decrypts the value before returning it.</p>
+<pre>curl -b cookies.txt https://devproof-toy.vercel.app/api/records?key=my-secret
+<span class="c"># → {"key":"my-secret","value":"hello world"}</span></pre>
+
+<h3><span class="tag get">GET</span> <code>/api/records</code></h3>
+<p>List all records for your session. Keys are visible, values are ciphertext (not decrypted).</p>
+<pre>curl -b cookies.txt https://devproof-toy.vercel.app/api/records
+<span class="c"># → {"records":[{"key":"my-secret","ciphertext":"{...}"}]}</span></pre>
+
+<h3><span class="tag get">GET</span> <code>/api/verify</code></h3>
+<p>Verify the TEE is running attested code. No authentication required.</p>
+<pre>curl https://devproof-toy.vercel.app/api/verify
+<span class="c"># → {"verified":true,"checks":[
+#      {"check":"tee_health","ok":true},
+#      {"check":"compose_hash","ok":true,"composeHash":"...","github":"https://github.com/..."},
+#      {"check":"stats","ok":true,"totalUsers":5,"totalRecords":7,...}
+#    ]}</span></pre>
+
+<h2>How it works</h2>
+<p>
+  The TEE (Trusted Execution Environment) runs inside a Confidential VM on
+  <a href="https://phala.network" target="_blank">Phala Network</a> with Intel TDX attestation.
+  It holds an AES-256-GCM encryption key derived from the TEE hardware — this key never leaves the enclave.
+</p>
+<p>
+  When you store a value, Vercel forwards the request to the TEE. The TEE encrypts the value
+  with a key derived from <code>userId:key</code> as additional authenticated data (AAD),
+  then writes the ciphertext directly to a Neon Postgres database. The database only ever sees ciphertext.
+</p>
+<p>
+  When you read a value, the TEE fetches the ciphertext from Postgres, decrypts it, and returns the plaintext.
+  Vercel never sees the encryption key or the plaintext — it only handles session cookies and proxies requests.
+</p>
+<p>
+  The <code>/api/verify</code> endpoint checks that the TEE is healthy and returns the
+  <code>compose_hash</code> — a hash of the Docker Compose file running inside the TEE.
+  This links directly to a
+  <a href="https://github.com/amiller/devproof-toy" target="_blank">GitHub commit</a>,
+  proving the running code matches the open source repository.
+</p>
+
+<h2>Architecture</h2>
+<pre style="background:#f5f5f5;color:#222;font-size:.75rem">Browser → Vercel (cookie session) → TEE (encrypt, decrypt) → Neon Postgres (ciphertext only)
+
+Vercel sees: keys, ciphertext, session cookies
+TEE sees: keys, plaintext values, encryption key
+Neon sees: keys, ciphertext
+Browser sees: keys, plaintext values</pre>
+
+</body></html>
