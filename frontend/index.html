@@ -112,7 +112,8 @@ async function verify(cvmUrl, data) {
   try {
     const metaUrl = cvmUrl.replace(/\/$/, '') + '/metadata'
     const metaRes = await fetch(metaUrl)
-    const metaHtml = await metaRes.text()
+    const metaRaw = await metaRes.text()
+    const metaHtml = metaRaw.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n))
     const m = metaHtml.match(/"compose_hash":\s*"([a-f0-9]+)"/)
     if (m) {
       const composeHash = m[1]
