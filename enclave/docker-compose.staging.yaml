@@ -1,6 +1,6 @@
 services:
   app:
-    image: ghcr.io/amiller/devproof-toy@sha256:c99245145521a0f9e416f67430a46a376fcd836d4cfddf8c100a2a875263e6ed
+    image: ghcr.io/amiller/devproof-toy@sha256:004e7cb08e2a2ada4d3508ae1a1d30876311326c473b0c377be1aa43f20350b8
     ports:
       - "8080:8080"
     volumes:
