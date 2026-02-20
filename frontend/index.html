@@ -30,11 +30,26 @@
 </div>
 
 <div class="row">
+  <button onclick="startSession()">Start Session</button>
+  <span id="sessionStatus">No session — click to start one</span>
+</div>
+
+<h2>Encrypted Records (via Neon DB)</h2>
+<div class="row">
+  <input type="text" id="recKey" placeholder="key">
+  <input type="text" id="recValue" placeholder="value">
+  <button onclick="storeRecord()">Store</button>
+  <button onclick="lookupRecord()">Lookup</button>
+  <button onclick="listAllRecords()">List All</button>
+</div>
+<pre id="recResult" style="display:none"></pre>
+
+<h2>Fetch a URL through the TEE</h2>
+
+<div class="row">
   <button onclick="getToken()">Get Token</button>
   <span id="tokenStatus">No token — click to get one</span>
 </div>
-
-<h2>Fetch a URL through the TEE</h2>
 <div class="row">
   <input type="text" id="targetUrl" value="https://api.coinbase.com/v2/prices/BTC-USD/spot">
   <button id="fetchBtn" onclick="doFetch()">Fetch</button>
@@ -77,8 +92,12 @@
   <strong>Access control:</strong> Vercel issues JWT tokens. The enclave validates them before
   allowing /fetch and /store operations. Anyone can verify attestations, but only token holders can use the oracle.
   <br><br>
-  <strong>Persistent data:</strong> The KV store is encrypted at rest (AES-256-GCM) with a key
-  derived inside the TEE. Data survives CVM redeploys because the derived key is deterministic.
+  <strong>Encrypted records (Neon DB):</strong> Vercel stores records in Neon Postgres, but only as ciphertext.
+  The TEE acts as an encryption oracle — Vercel sends plaintext, TEE returns ciphertext, Vercel stores it.
+  The DB is auditable (you can see keys) but private (values are AES-256-GCM encrypted, key held only in TEE).
+  <br><br>
+  <strong>TEE-local KV store:</strong> The KV store below is encrypted at rest inside the TEE itself.
+  Data survives CVM redeploys because the derived key is deterministic.
   The exit report is a signed snapshot of TEE activity — verifiable offline, even after shutdown.
 </div>
 
@@ -88,8 +107,45 @@ import { keccak_256 } from 'https://esm.sh/@noble/hashes@1.7.1/sha3'
 import { sha256 } from 'https://esm.sh/@noble/hashes@1.7.1/sha256'
 
 let token = null
+let sessionUserId = null
 const cvm = () => document.getElementById('cvmUrl').value.replace(/\/$/, '')
 const authHeaders = () => token ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' }
+const showRec = (data) => { const el = document.getElementById('recResult'); el.style.display = 'block'; el.textContent = JSON.stringify(data, null, 2) }
+
+// Check for existing session on load
+;(async () => {
+  try {
+    const res = await fetch('/api/session', { credentials: 'include' })
+    if (res.ok) { const d = await res.json(); sessionUserId = d.userId; document.getElementById('sessionStatus').textContent = `Session: ${d.userId}` }
+  } catch {}
+})()
+
+window.startSession = async function() {
+  const res = await fetch('/api/session', { method: 'POST', credentials: 'include' })
+  const data = await res.json()
+  sessionUserId = data.userId
+  document.getElementById('sessionStatus').textContent = `Session: ${data.userId}`
+}
+
+window.storeRecord = async function() {
+  if (!sessionUserId) return alert('Start a session first')
+  const key = document.getElementById('recKey').value, value = document.getElementById('recValue').value
+  const res = await fetch('/api/records', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, value }) })
+  showRec(await res.json())
+}
+
+window.lookupRecord = async function() {
+  if (!sessionUserId) return alert('Start a session first')
+  const key = document.getElementById('recKey').value
+  const res = await fetch(`/api/records?key=${encodeURIComponent(key)}`, { credentials: 'include' })
+  showRec(await res.json())
+}
+
+window.listAllRecords = async function() {
+  if (!sessionUserId) return alert('Start a session first')
+  const res = await fetch('/api/records', { credentials: 'include' })
+  showRec(await res.json())
+}
 
 window.getToken = async function() {
   const res = await fetch('/api/token', { method: 'POST' })

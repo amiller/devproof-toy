@@ -138,6 +138,28 @@ const server = http.createServer(async (req, res) => {
     else if (req.url === '/key') result = await getKey()
     else if (req.url === '/fetch' && req.method === 'POST') { requireAuth(req); result = await handleFetch(await readBody(req)) }
     else if (req.url === '/report') result = await generateReport()
+    else if (req.url === '/encrypt' && req.method === 'POST') {
+      requireAuth(req)
+      const { userId, key, value } = JSON.parse(await readBody(req))
+      if (!value) throw new Error('value required')
+      const label = `${userId}:${key}`
+      const iv = crypto.randomBytes(12)
+      const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv)
+      cipher.setAAD(Buffer.from(label))
+      const enc = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
+      const ciphertext = JSON.stringify({ iv: iv.toString('hex'), data: enc.toString('hex'), tag: cipher.getAuthTag().toString('hex'), label })
+      result = { ciphertext }
+    }
+    else if (req.url === '/decrypt' && req.method === 'POST') {
+      requireAuth(req)
+      const { ciphertext } = JSON.parse(await readBody(req))
+      const { iv, data, tag, label } = JSON.parse(ciphertext)
+      const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, Buffer.from(iv, 'hex'))
+      decipher.setAuthTag(Buffer.from(tag, 'hex'))
+      if (label) decipher.setAAD(Buffer.from(label))
+      const value = decipher.update(Buffer.from(data, 'hex'), null, 'utf8') + decipher.final('utf8')
+      result = { value }
+    }
     else if (req.url === '/store' && req.method === 'POST') {
       requireAuth(req)
       const { key, value } = JSON.parse(await readBody(req))
