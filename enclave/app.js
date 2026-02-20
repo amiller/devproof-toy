@@ -78,7 +78,7 @@ const server = http.createServer(async (req, res) => {
     else if (req.url === '/metadata') {
       // Proxy 8090 metadata (which has no CORS) so the frontend can read compose_hash
       const meta = await new Promise((resolve, reject) => {
-        http.get('http://localhost:8090/', r => {
+        http.get('http://172.17.0.1:8090/', r => {
           let buf = ''; r.on('data', c => buf += c); r.on('end', () => resolve(buf))
         }).on('error', reject)
       })
