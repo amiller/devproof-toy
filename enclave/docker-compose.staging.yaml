@@ -1,8 +1,10 @@
 services:
   app:
-    image: ghcr.io/amiller/devproof-toy@sha256:004e7cb08e2a2ada4d3508ae1a1d30876311326c473b0c377be1aa43f20350b8
+    image: ghcr.io/amiller/devproof-toy@sha256:76b960179b4be565fc00b82e21c2b53260f59ddf394351848b12822652335662
     ports:
       - "8080:8080"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - store-data:/data
