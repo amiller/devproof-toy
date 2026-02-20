@@ -2,11 +2,13 @@ const http = require('http')
 const https = require('https')
 const crypto = require('crypto')
 const fs = require('fs')
+const { neon } = require('@neondatabase/serverless')
 
 const PORT = process.env.PORT || 8080
 const SOCK = '/var/run/dstack.sock'
 const STORE_PATH = '/data/store.enc'
 const JWT_SECRET = process.env.JWT_SECRET || 'devproof-demo-secret'
+const DATABASE_URL = process.env.DATABASE_URL
 
 // --- dstack helpers ---
 function dstackCall(path, body) {
@@ -99,6 +101,39 @@ async function generateReport() {
   return { type: 'tee-exit-report', generated: new Date().toISOString(), stats: s, hash, publicKey, signatureChain: signature_chain, quote: quote.quote }
 }
 
+// --- Neon DB records (encrypted values) ---
+let sql = null
+async function initDb() {
+  if (!DATABASE_URL) return
+  sql = neon(DATABASE_URL)
+  await sql`CREATE TABLE IF NOT EXISTS records (
+    user_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    ciphertext TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (user_id, key)
+  )`
+  console.log('Neon DB connected, records table ready')
+}
+
+function sealValue(userId, key, value) {
+  const iv = crypto.randomBytes(12)
+  const aad = Buffer.from(`${userId}:${key}`)
+  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv)
+  cipher.setAAD(aad)
+  const enc = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
+  return JSON.stringify({ iv: iv.toString('hex'), data: enc.toString('hex'), tag: cipher.getAuthTag().toString('hex') })
+}
+
+function unsealValue(userId, key, ciphertext) {
+  const { iv, data, tag } = JSON.parse(ciphertext)
+  const aad = Buffer.from(`${userId}:${key}`)
+  const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, Buffer.from(iv, 'hex'))
+  decipher.setAuthTag(Buffer.from(tag, 'hex'))
+  decipher.setAAD(aad)
+  return decipher.update(Buffer.from(data, 'hex'), null, 'utf8') + decipher.final('utf8')
+}
+
 // --- JWT validation (HMAC-SHA256, no deps) ---
 function b64url(s) { return Buffer.from(s).toString('base64url') }
 function verifyJwt(token) {
@@ -138,27 +173,31 @@ const server = http.createServer(async (req, res) => {
     else if (req.url === '/key') result = await getKey()
     else if (req.url === '/fetch' && req.method === 'POST') { requireAuth(req); result = await handleFetch(await readBody(req)) }
     else if (req.url === '/report') result = await generateReport()
-    else if (req.url === '/encrypt' && req.method === 'POST') {
+    else if (req.url === '/records' && req.method === 'POST') {
       requireAuth(req)
+      if (!sql) throw new Error('DATABASE_URL not configured')
       const { userId, key, value } = JSON.parse(await readBody(req))
-      if (!value) throw new Error('value required')
-      const label = `${userId}:${key}`
-      const iv = crypto.randomBytes(12)
-      const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv)
-      cipher.setAAD(Buffer.from(label))
-      const enc = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()])
-      const ciphertext = JSON.stringify({ iv: iv.toString('hex'), data: enc.toString('hex'), tag: cipher.getAuthTag().toString('hex'), label })
-      result = { ciphertext }
+      if (!userId || !key || value === undefined) throw new Error('userId, key, value required')
+      const ciphertext = sealValue(userId, key, String(value))
+      await sql`INSERT INTO records (user_id, key, ciphertext) VALUES (${userId}, ${key}, ${ciphertext})
+        ON CONFLICT (user_id, key) DO UPDATE SET ciphertext = ${ciphertext}`
+      result = { ok: true, key }
     }
-    else if (req.url === '/decrypt' && req.method === 'POST') {
+    else if (req.url.startsWith('/records') && req.method === 'GET') {
       requireAuth(req)
-      const { ciphertext } = JSON.parse(await readBody(req))
-      const { iv, data, tag, label } = JSON.parse(ciphertext)
-      const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, Buffer.from(iv, 'hex'))
-      decipher.setAuthTag(Buffer.from(tag, 'hex'))
-      if (label) decipher.setAAD(Buffer.from(label))
-      const value = decipher.update(Buffer.from(data, 'hex'), null, 'utf8') + decipher.final('utf8')
-      result = { value }
+      if (!sql) throw new Error('DATABASE_URL not configured')
+      const params = new URL(req.url, 'http://x').searchParams
+      const userId = params.get('userId')
+      if (!userId) throw new Error('userId required')
+      const key = params.get('key')
+      if (key) {
+        const rows = await sql`SELECT ciphertext FROM records WHERE user_id = ${userId} AND key = ${key}`
+        if (!rows.length) { res.writeHead(404); return res.end(JSON.stringify({ error: 'not found' })) }
+        result = { key, value: unsealValue(userId, key, rows[0].ciphertext) }
+      } else {
+        const rows = await sql`SELECT key, ciphertext FROM records WHERE user_id = ${userId} ORDER BY created_at`
+        result = { records: rows.map(r => ({ key: r.key, ciphertext: r.ciphertext })) }
+      }
     }
     else if (req.url === '/store' && req.method === 'POST') {
       requireAuth(req)
@@ -197,6 +236,6 @@ const server = http.createServer(async (req, res) => {
   }
 })
 
-initStore()
+Promise.all([initStore(), initDb()])
   .then(() => server.listen(PORT, () => console.log(`tls-oracle listening on :${PORT}`)))
-  .catch(e => { console.log('Store init failed (maybe no dstack socket yet), starting without persistence:', e.message); server.listen(PORT, () => console.log(`tls-oracle listening on :${PORT} (no persistence)`)) })
+  .catch(e => { console.log('Init failed:', e.message); server.listen(PORT, () => console.log(`tls-oracle listening on :${PORT} (degraded)`)) })
