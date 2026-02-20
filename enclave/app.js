@@ -63,7 +63,7 @@ function saveStore() {
 }
 
 // --- Stats (per-run, in-memory) ---
-const stats = { fetchRequests: 0, storeWrites: 0, storeReads: 0, startTime: new Date().toISOString(), lastRequest: null }
+const stats = { fetchRequests: 0, storeWrites: 0, storeReads: 0, recordWrites: 0, recordReads: 0, startTime: new Date().toISOString(), lastRequest: null }
 
 function tick() { stats.lastRequest = new Date().toISOString() }
 
@@ -170,6 +170,16 @@ const server = http.createServer(async (req, res) => {
     let result
 
     if (req.url === '/health') result = { ok: true }
+    else if (req.url === '/stats') {
+      const s = { startTime: stats.startTime, uptime: Math.floor((Date.now() - new Date(stats.startTime).getTime()) / 1000) + 's', requests: stats }
+      if (sql) {
+        const [u] = await sql`SELECT count(DISTINCT user_id) as n FROM records`
+        const [r] = await sql`SELECT count(*) as n FROM records`
+        s.totalUsers = Number(u.n)
+        s.totalRecords = Number(r.n)
+      }
+      result = s
+    }
     else if (req.url === '/key') result = await getKey()
     else if (req.url === '/fetch' && req.method === 'POST') { requireAuth(req); result = await handleFetch(await readBody(req)) }
     else if (req.url === '/report') result = await generateReport()
@@ -181,6 +191,7 @@ const server = http.createServer(async (req, res) => {
       const ciphertext = sealValue(userId, key, String(value))
       await sql`INSERT INTO records (user_id, key, ciphertext) VALUES (${userId}, ${key}, ${ciphertext})
         ON CONFLICT (user_id, key) DO UPDATE SET ciphertext = ${ciphertext}`
+      stats.recordWrites++; tick()
       result = { ok: true, key }
     }
     else if (req.url.startsWith('/records') && req.method === 'GET') {
@@ -190,6 +201,7 @@ const server = http.createServer(async (req, res) => {
       const userId = params.get('userId')
       if (!userId) throw new Error('userId required')
       const key = params.get('key')
+      stats.recordReads++; tick()
       if (key) {
         const rows = await sql`SELECT ciphertext FROM records WHERE user_id = ${userId} AND key = ${key}`
         if (!rows.length) { res.writeHead(404); return res.end(JSON.stringify({ error: 'not found' })) }
