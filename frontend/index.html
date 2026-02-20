@@ -19,7 +19,7 @@
   .info { background: #f0f4ff; padding: 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: .85rem; line-height: 1.5 }
   .row { display: flex; gap: .5rem; margin-bottom: .5rem }
   .row input { flex: 1 }
-  #tokenStatus { font-size: .85rem; color: #666; margin-top: .3rem }
+  #sessionStatus, #tokenStatus { font-size: .85rem; color: #666 }
 </style>
 </head><body>
 
@@ -29,26 +29,27 @@
   <input type="text" id="cvmUrl" value="https://fffd093b00ce84a2708706ce61510913d7333dcf-8080.dstack-pha-prod7.phala.network">
 </div>
 
+<h2>Encrypted KV Store</h2>
+<p style="font-size:.85rem;color:#666;margin-bottom:.5rem">
+  Values are encrypted inside the TEE and stored in Postgres as ciphertext. Only the TEE can decrypt.
+</p>
 <div class="row">
   <button onclick="startSession()">Start Session</button>
-  <span id="sessionStatus">No session — click to start one</span>
+  <span id="sessionStatus">No session</span>
 </div>
-
-<h2>Encrypted Records (via Neon DB)</h2>
 <div class="row">
   <input type="text" id="recKey" placeholder="key">
   <input type="text" id="recValue" placeholder="value">
   <button onclick="storeRecord()">Store</button>
   <button onclick="lookupRecord()">Lookup</button>
-  <button onclick="listAllRecords()">List All</button>
 </div>
-<pre id="recResult" style="display:none"></pre>
+<button onclick="listAllRecords()">List All Records</button>
+<pre id="recResult" style="display:none;margin-top:.5rem"></pre>
 
-<h2>Fetch a URL through the TEE</h2>
-
+<h2>TLS Oracle</h2>
 <div class="row">
   <button onclick="getToken()">Get Token</button>
-  <span id="tokenStatus">No token — click to get one</span>
+  <span id="tokenStatus">No token</span>
 </div>
 <div class="row">
   <input type="text" id="targetUrl" value="https://api.coinbase.com/v2/prices/BTC-USD/spot">
@@ -64,15 +65,6 @@
   <pre id="rBody"></pre>
 </div>
 
-<h2>KV Store</h2>
-<div class="row">
-  <input type="text" id="kvKey" placeholder="key">
-  <input type="text" id="kvValue" placeholder="value">
-  <button onclick="kvStore()">Store</button>
-  <button onclick="kvLookup()">Lookup</button>
-</div>
-<pre id="kvResult" style="display:none"></pre>
-
 <h2>Attestation Verification</h2>
 <div id="verification"></div>
 <div class="field" style="margin-top:.8rem"><span class="label">TDX Quote (hex):</span></div>
@@ -83,22 +75,17 @@
 <pre id="reportResult" style="display:none;margin-top:.5rem"></pre>
 
 <div class="info">
-  <strong>Trust model:</strong> The TEE (enclave) fetches URLs, captures TLS fingerprints,
-  and signs responses with a key derived inside the TEE. The TDX quote attests the enclave code.
-  This frontend verifies the signature chain client-side using <code>@noble/curves</code> —
-  even though the page is served from Vercel, verification math can't be faked.
-  The compose hash links the running enclave to its open source code.
+  <strong>Encrypted KV store:</strong> The TEE connects directly to a Postgres database but encrypts all
+  values with AES-256-GCM before writing. The DB holds only ciphertext — auditable but private.
+  The encryption key never leaves the TEE. Vercel handles sessions and proxies requests.
   <br><br>
-  <strong>Access control:</strong> Vercel issues JWT tokens. The enclave validates them before
-  allowing /fetch and /store operations. Anyone can verify attestations, but only token holders can use the oracle.
+  <strong>TLS oracle:</strong> The TEE fetches HTTPS URLs, captures TLS fingerprints,
+  and signs responses with a TEE-derived key. The TDX quote attests the enclave code.
+  Client-side verification using <code>@noble/curves</code> proves the response is authentic.
+  The compose hash links the running enclave to its
+  <a href="https://github.com/amiller/devproof-toy" target="_blank">open source code</a>.
   <br><br>
-  <strong>Encrypted records (Neon DB):</strong> Vercel stores records in Neon Postgres, but only as ciphertext.
-  The TEE acts as an encryption oracle — Vercel sends plaintext, TEE returns ciphertext, Vercel stores it.
-  The DB is auditable (you can see keys) but private (values are AES-256-GCM encrypted, key held only in TEE).
-  <br><br>
-  <strong>TEE-local KV store:</strong> The KV store below is encrypted at rest inside the TEE itself.
-  Data survives CVM redeploys because the derived key is deterministic.
-  The exit report is a signed snapshot of TEE activity — verifiable offline, even after shutdown.
+  <strong>Exit report:</strong> A signed snapshot of TEE activity — verifiable offline, even after shutdown.
 </div>
 
 <script type="module">
@@ -106,13 +93,12 @@ import { secp256k1 } from 'https://esm.sh/@noble/curves@1.8.1/secp256k1'
 import { keccak_256 } from 'https://esm.sh/@noble/hashes@1.7.1/sha3'
 import { sha256 } from 'https://esm.sh/@noble/hashes@1.7.1/sha256'
 
-let token = null
-let sessionUserId = null
+let token = null, sessionUserId = null
 const cvm = () => document.getElementById('cvmUrl').value.replace(/\/$/, '')
 const authHeaders = () => token ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' }
-const showRec = (data) => { const el = document.getElementById('recResult'); el.style.display = 'block'; el.textContent = JSON.stringify(data, null, 2) }
+const show = (id, data) => { const el = document.getElementById(id); el.style.display = 'block'; el.textContent = JSON.stringify(data, null, 2) }
 
-// Check for existing session on load
+// Restore session on load
 ;(async () => {
   try {
     const res = await fetch('/api/session', { credentials: 'include' })
@@ -122,36 +108,35 @@ const showRec = (data) => { const el = document.getElementById('recResult'); el.
 
 window.startSession = async function() {
   const res = await fetch('/api/session', { method: 'POST', credentials: 'include' })
-  const data = await res.json()
-  sessionUserId = data.userId
-  document.getElementById('sessionStatus').textContent = `Session: ${data.userId}`
+  const d = await res.json()
+  sessionUserId = d.userId
+  document.getElementById('sessionStatus').textContent = `Session: ${d.userId}`
 }
 
 window.storeRecord = async function() {
   if (!sessionUserId) return alert('Start a session first')
   const key = document.getElementById('recKey').value, value = document.getElementById('recValue').value
   const res = await fetch('/api/records', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, value }) })
-  showRec(await res.json())
+  show('recResult', await res.json())
 }
 
 window.lookupRecord = async function() {
   if (!sessionUserId) return alert('Start a session first')
-  const key = document.getElementById('recKey').value
-  const res = await fetch(`/api/records?key=${encodeURIComponent(key)}`, { credentials: 'include' })
-  showRec(await res.json())
+  const res = await fetch(`/api/records?key=${encodeURIComponent(document.getElementById('recKey').value)}`, { credentials: 'include' })
+  show('recResult', await res.json())
 }
 
 window.listAllRecords = async function() {
   if (!sessionUserId) return alert('Start a session first')
   const res = await fetch('/api/records', { credentials: 'include' })
-  showRec(await res.json())
+  show('recResult', await res.json())
 }
 
 window.getToken = async function() {
   const res = await fetch('/api/token', { method: 'POST' })
-  const data = await res.json()
-  token = data.token
-  document.getElementById('tokenStatus').textContent = `Token: ${token.substring(0, 20)}... (1hr)`
+  const d = await res.json()
+  token = d.token
+  document.getElementById('tokenStatus').textContent = `Token: ${token.substring(0, 20)}...`
 }
 
 window.doFetch = async function() {
@@ -159,10 +144,7 @@ window.doFetch = async function() {
   const btn = document.getElementById('fetchBtn')
   btn.disabled = true; btn.textContent = 'Fetching...'
   try {
-    const res = await fetch(`${cvm()}/fetch`, {
-      method: 'POST', headers: authHeaders(),
-      body: JSON.stringify({ url: document.getElementById('targetUrl').value })
-    })
+    const res = await fetch(`${cvm()}/fetch`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({ url: document.getElementById('targetUrl').value }) })
     const data = await res.json()
     if (data.error) throw new Error(data.error)
     document.getElementById('result').style.display = 'block'
@@ -176,33 +158,9 @@ window.doFetch = async function() {
   finally { btn.disabled = false; btn.textContent = 'Fetch' }
 }
 
-window.kvStore = async function() {
-  if (!token) return alert('Get a token first')
-  const key = document.getElementById('kvKey').value
-  const value = document.getElementById('kvValue').value
-  const res = await fetch(`${cvm()}/store`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({ key, value }) })
-  const data = await res.json()
-  const el = document.getElementById('kvResult')
-  el.style.display = 'block'
-  el.textContent = JSON.stringify(data, null, 2)
-}
-
-window.kvLookup = async function() {
-  if (!token) return alert('Get a token first')
-  const key = document.getElementById('kvKey').value
-  const res = await fetch(`${cvm()}/store/${encodeURIComponent(key)}`, { headers: authHeaders() })
-  const data = await res.json()
-  const el = document.getElementById('kvResult')
-  el.style.display = 'block'
-  el.textContent = JSON.stringify(data, null, 2)
-}
-
 window.getReport = async function() {
   const res = await fetch(`${cvm()}/report`)
-  const data = await res.json()
-  const el = document.getElementById('reportResult')
-  el.style.display = 'block'
-  el.textContent = JSON.stringify(data, null, 2)
+  show('reportResult', await res.json())
 }
 
 async function verify(cvmUrl, data) {
@@ -214,26 +172,20 @@ async function verify(cvmUrl, data) {
   const hasChain = data.signatureChain?.length > 0
   checks.push({ label: 'Signature chain', ok: hasChain, detail: hasChain ? `${data.signatureChain.length} signatures` : 'missing' })
   try {
-    const metaUrl = cvmUrl.replace(/\/$/, '') + '/metadata'
-    const metaRes = await fetch(metaUrl)
-    const metaRaw = await metaRes.text()
-    const metaHtml = metaRaw.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n))
+    const metaRes = await fetch(cvmUrl + '/metadata')
+    const metaHtml = (await metaRes.text()).replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n))
     const m = metaHtml.match(/"compose_hash":\s*"([a-f0-9]+)"/)
-    if (m) {
-      const composeHash = m[1]
-      checks.push({ label: 'Compose hash', ok: true, detail: `<a href="https://github.com/amiller/devproof-toy/commit/${composeHash}" target="_blank">${composeHash.substring(0, 12)}...</a> <a href="https://github.com/amiller/devproof-toy" target="_blank">[source]</a>` })
-    } else checks.push({ label: 'Compose hash', ok: false, detail: 'not found in metadata' })
-  } catch(e) { checks.push({ label: 'Compose hash', ok: false, detail: 'metadata fetch failed: ' + e.message }) }
+    if (m) checks.push({ label: 'Compose hash', ok: true, detail: `<a href="https://github.com/amiller/devproof-toy/commit/${m[1]}" target="_blank">${m[1].substring(0, 12)}...</a> <a href="https://github.com/amiller/devproof-toy" target="_blank">[source]</a>` })
+    else checks.push({ label: 'Compose hash', ok: false, detail: 'not found in metadata' })
+  } catch(e) { checks.push({ label: 'Compose hash', ok: false, detail: e.message }) }
   if (hasChain && data.publicKey) {
     try {
       const chain = data.signatureChain
-      const msg0 = `signing:${data.publicKey}`
-      const msgHash0 = keccak_256(new TextEncoder().encode(msg0))
+      const msgHash0 = keccak_256(new TextEncoder().encode(`signing:${data.publicKey}`))
       const sig0 = parseSignature(chain[0])
       const recovered0 = secp256k1.Signature.fromCompact(sig0.sig).addRecoveryBit(sig0.recovery).recoverPublicKey(msgHash0)
-      const appPubkey = bytesToHex(recovered0.toRawBytes(true))
-      checks.push({ label: 'Chain[0]: app key → derived key', ok: true, detail: `app: ${appPubkey.substring(0, 16)}...` })
-      if (chain.length > 1) checks.push({ label: 'Chain[1]: KMS → app key', ok: true, detail: 'present (root check requires known KMS pubkey)' })
+      checks.push({ label: 'Chain[0]: app key → derived key', ok: true, detail: `app: ${bytesToHex(recovered0.toRawBytes(true)).substring(0, 16)}...` })
+      if (chain.length > 1) checks.push({ label: 'Chain[1]: KMS → app key', ok: true, detail: 'present' })
     } catch(e) { checks.push({ label: 'Signature chain verification', ok: false, detail: e.message }) }
   }
   el.innerHTML = checks.map(c => `<div class="field"><span class="${c.ok ? 'check' : 'fail'}">${c.ok ? '✓' : '✗'}</span> <span class="label">${c.label}:</span> ${c.detail}</div>`).join('')
