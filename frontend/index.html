@@ -3,7 +3,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TLS Oracle — Devproof</title>
-<script src="https://cdn.jsdelivr.net/npm/@noble/curves@1.8.1/+esm" type="module"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0 }
   body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222 }
@@ -59,9 +58,9 @@
 </div>
 
 <script type="module">
-import { secp256k1 } from 'https://cdn.jsdelivr.net/npm/@noble/curves@1.8.1/esm/secp256k1.js'
-import { keccak_256 } from 'https://cdn.jsdelivr.net/npm/@noble/hashes@1.7.1/esm/sha3.js'
-import { sha256 } from 'https://cdn.jsdelivr.net/npm/@noble/hashes@1.7.1/esm/sha256.js'
+import { secp256k1 } from 'https://esm.sh/@noble/curves@1.8.1/secp256k1'
+import { keccak_256 } from 'https://esm.sh/@noble/hashes@1.7.1/sha3'
+import { sha256 } from 'https://esm.sh/@noble/hashes@1.7.1/sha256'
 
 window.doFetch = async function() {
   const cvmUrl = document.getElementById('cvmUrl').value.replace(/\/$/, '')
@@ -111,7 +110,7 @@ async function verify(cvmUrl, data) {
 
   // 4. Compose hash from 8090
   try {
-    const metaUrl = cvmUrl.replace('-8080.', '-8090.')
+    const metaUrl = cvmUrl.replace(/\/$/, '') + '/metadata'
     const metaRes = await fetch(metaUrl)
     const metaHtml = await metaRes.text()
     const m = metaHtml.match(/"compose_hash":\s*"([a-f0-9]+)"/)

@@ -75,6 +75,16 @@ const server = http.createServer(async (req, res) => {
     if (req.url === '/health') result = { ok: true }
     else if (req.url === '/key') result = await getKey()
     else if (req.url === '/fetch' && req.method === 'POST') result = await handleFetch(await readBody(req))
+    else if (req.url === '/metadata') {
+      // Proxy 8090 metadata (which has no CORS) so the frontend can read compose_hash
+      const meta = await new Promise((resolve, reject) => {
+        http.get('http://localhost:8090/', r => {
+          let buf = ''; r.on('data', c => buf += c); r.on('end', () => resolve(buf))
+        }).on('error', reject)
+      })
+      res.writeHead(200, { 'Content-Type': 'text/html' })
+      return res.end(meta)
+    }
     else { res.writeHead(404); return res.end(JSON.stringify({ error: 'not found' })) }
 
     res.writeHead(200, { 'Content-Type': 'application/json' })
