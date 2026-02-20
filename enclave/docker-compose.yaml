@@ -5,3 +5,6 @@ services:
       - "8080:8080"
     volumes:
       - ~/.phala-cloud/simulator/0.5.3/dstack.sock:/var/run/dstack.sock
+      - store-data:/data
+volumes:
+  store-data:

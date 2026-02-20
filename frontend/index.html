@@ -16,20 +16,26 @@
   .check { color: #2a2 } .fail { color: #c22 }
   .field { margin: .3rem 0 }
   .label { font-weight: 600; font-size: .85rem; color: #666 }
-  #trust { background: #f0f4ff; padding: 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: .85rem; line-height: 1.5 }
-  .config { display: flex; gap: .5rem; margin-bottom: 1rem }
-  .config input { flex: 1 }
+  .info { background: #f0f4ff; padding: 1rem; border-radius: 6px; margin-top: 1.5rem; font-size: .85rem; line-height: 1.5 }
+  .row { display: flex; gap: .5rem; margin-bottom: .5rem }
+  .row input { flex: 1 }
+  #tokenStatus { font-size: .85rem; color: #666; margin-top: .3rem }
 </style>
 </head><body>
 
 <h1>TLS Oracle — Devproof</h1>
 
-<div class="config">
+<div class="row">
   <input type="text" id="cvmUrl" value="https://fffd093b00ce84a2708706ce61510913d7333dcf-8080.dstack-pha-prod7.phala.network">
 </div>
 
+<div class="row">
+  <button onclick="getToken()">Get Token</button>
+  <span id="tokenStatus">No token — click to get one</span>
+</div>
+
 <h2>Fetch a URL through the TEE</h2>
-<div style="display:flex;gap:.5rem">
+<div class="row">
   <input type="text" id="targetUrl" value="https://api.coinbase.com/v2/prices/BTC-USD/spot">
   <button id="fetchBtn" onclick="doFetch()">Fetch</button>
 </div>
@@ -41,20 +47,39 @@
   <div class="field"><span class="label">Timestamp:</span> <span id="rTimestamp"></span></div>
   <div class="field"><span class="label">Body:</span></div>
   <pre id="rBody"></pre>
-
-  <h2>Attestation Verification</h2>
-  <div id="verification"></div>
-
-  <div class="field" style="margin-top:.8rem"><span class="label">TDX Quote (hex):</span></div>
-  <pre id="rQuote" style="max-height:120px;overflow-y:auto"></pre>
 </div>
 
-<div id="trust">
+<h2>KV Store</h2>
+<div class="row">
+  <input type="text" id="kvKey" placeholder="key">
+  <input type="text" id="kvValue" placeholder="value">
+  <button onclick="kvStore()">Store</button>
+  <button onclick="kvLookup()">Lookup</button>
+</div>
+<pre id="kvResult" style="display:none"></pre>
+
+<h2>Attestation Verification</h2>
+<div id="verification"></div>
+<div class="field" style="margin-top:.8rem"><span class="label">TDX Quote (hex):</span></div>
+<pre id="rQuote" style="max-height:120px;overflow-y:auto"></pre>
+
+<h2>Exit Report</h2>
+<button onclick="getReport()">Generate Report</button>
+<pre id="reportResult" style="display:none;margin-top:.5rem"></pre>
+
+<div class="info">
   <strong>Trust model:</strong> The TEE (enclave) fetches URLs, captures TLS fingerprints,
   and signs responses with a key derived inside the TEE. The TDX quote attests the enclave code.
   This frontend verifies the signature chain client-side using <code>@noble/curves</code> —
   even though the page is served from Vercel, verification math can't be faked.
   The compose hash links the running enclave to its open source code.
+  <br><br>
+  <strong>Access control:</strong> Vercel issues JWT tokens. The enclave validates them before
+  allowing /fetch and /store operations. Anyone can verify attestations, but only token holders can use the oracle.
+  <br><br>
+  <strong>Persistent data:</strong> The KV store is encrypted at rest (AES-256-GCM) with a key
+  derived inside the TEE. Data survives CVM redeploys because the derived key is deterministic.
+  The exit report is a signed snapshot of TEE activity — verifiable offline, even after shutdown.
 </div>
 
 <script type="module">
@@ -62,53 +87,76 @@ import { secp256k1 } from 'https://esm.sh/@noble/curves@1.8.1/secp256k1'
 import { keccak_256 } from 'https://esm.sh/@noble/hashes@1.7.1/sha3'
 import { sha256 } from 'https://esm.sh/@noble/hashes@1.7.1/sha256'
 
-window.doFetch = async function() {
-  const cvmUrl = document.getElementById('cvmUrl').value.replace(/\/$/, '')
-  const targetUrl = document.getElementById('targetUrl').value
-  if (!cvmUrl) return alert('Set CVM URL first')
+let token = null
+const cvm = () => document.getElementById('cvmUrl').value.replace(/\/$/, '')
+const authHeaders = () => token ? { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' }
 
+window.getToken = async function() {
+  const res = await fetch('/api/token', { method: 'POST' })
+  const data = await res.json()
+  token = data.token
+  document.getElementById('tokenStatus').textContent = `Token: ${token.substring(0, 20)}... (1hr)`
+}
+
+window.doFetch = async function() {
+  if (!token) return alert('Get a token first')
   const btn = document.getElementById('fetchBtn')
   btn.disabled = true; btn.textContent = 'Fetching...'
-
   try {
-    const res = await fetch(`${cvmUrl}/fetch`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: targetUrl })
+    const res = await fetch(`${cvm()}/fetch`, {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ url: document.getElementById('targetUrl').value })
     })
     const data = await res.json()
-
+    if (data.error) throw new Error(data.error)
     document.getElementById('result').style.display = 'block'
     document.getElementById('rUrl').textContent = data.url
     document.getElementById('rFingerprint').textContent = data.tlsFingerprint || '(none)'
     document.getElementById('rTimestamp').textContent = data.timestamp
     document.getElementById('rBody').textContent = data.body?.substring(0, 2000)
     document.getElementById('rQuote').textContent = data.quote || '(none)'
+    await verify(cvm(), data)
+  } catch(e) { alert('Error: ' + e.message) }
+  finally { btn.disabled = false; btn.textContent = 'Fetch' }
+}
 
-    await verify(cvmUrl, data)
-  } catch(e) {
-    alert('Error: ' + e.message)
-  } finally {
-    btn.disabled = false; btn.textContent = 'Fetch'
-  }
+window.kvStore = async function() {
+  if (!token) return alert('Get a token first')
+  const key = document.getElementById('kvKey').value
+  const value = document.getElementById('kvValue').value
+  const res = await fetch(`${cvm()}/store`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({ key, value }) })
+  const data = await res.json()
+  const el = document.getElementById('kvResult')
+  el.style.display = 'block'
+  el.textContent = JSON.stringify(data, null, 2)
+}
+
+window.kvLookup = async function() {
+  if (!token) return alert('Get a token first')
+  const key = document.getElementById('kvKey').value
+  const res = await fetch(`${cvm()}/store/${encodeURIComponent(key)}`, { headers: authHeaders() })
+  const data = await res.json()
+  const el = document.getElementById('kvResult')
+  el.style.display = 'block'
+  el.textContent = JSON.stringify(data, null, 2)
+}
+
+window.getReport = async function() {
+  const res = await fetch(`${cvm()}/report`)
+  const data = await res.json()
+  const el = document.getElementById('reportResult')
+  el.style.display = 'block'
+  el.textContent = JSON.stringify(data, null, 2)
 }
 
 async function verify(cvmUrl, data) {
   const el = document.getElementById('verification')
   const checks = []
-
-  // 1. Hash matches
   const expected = bytesToHex(sha256(data.url + data.body + (data.tlsFingerprint || '') + data.timestamp))
   checks.push({ label: 'Response hash', ok: expected === data.hash, detail: data.hash?.substring(0, 16) + '...' })
-
-  // 2. Quote present
   checks.push({ label: 'TDX quote present', ok: !!data.quote, detail: data.quote ? `${data.quote.length} chars` : 'missing' })
-
-  // 3. Signature chain present
   const hasChain = data.signatureChain?.length > 0
   checks.push({ label: 'Signature chain', ok: hasChain, detail: hasChain ? `${data.signatureChain.length} signatures` : 'missing' })
-
-  // 4. Compose hash from 8090
   try {
     const metaUrl = cvmUrl.replace(/\/$/, '') + '/metadata'
     const metaRes = await fetch(metaUrl)
@@ -118,55 +166,25 @@ async function verify(cvmUrl, data) {
     if (m) {
       const composeHash = m[1]
       checks.push({ label: 'Compose hash', ok: true, detail: `<a href="https://github.com/amiller/devproof-toy/commit/${composeHash}" target="_blank">${composeHash.substring(0, 12)}...</a> <a href="https://github.com/amiller/devproof-toy" target="_blank">[source]</a>` })
-    } else {
-      checks.push({ label: 'Compose hash', ok: false, detail: 'not found in metadata' })
-    }
-  } catch(e) {
-    checks.push({ label: 'Compose hash', ok: false, detail: 'metadata fetch failed: ' + e.message })
-  }
-
-  // 5. Signature chain verification (secp256k1 ecrecover)
+    } else checks.push({ label: 'Compose hash', ok: false, detail: 'not found in metadata' })
+  } catch(e) { checks.push({ label: 'Compose hash', ok: false, detail: 'metadata fetch failed: ' + e.message }) }
   if (hasChain && data.publicKey) {
     try {
       const chain = data.signatureChain
-      // chain[0]: app key signs "signing:{derivedKeyHex}"
       const msg0 = `signing:${data.publicKey}`
       const msgHash0 = keccak_256(new TextEncoder().encode(msg0))
       const sig0 = parseSignature(chain[0])
       const recovered0 = secp256k1.Signature.fromCompact(sig0.sig).addRecoveryBit(sig0.recovery).recoverPublicKey(msgHash0)
       const appPubkey = bytesToHex(recovered0.toRawBytes(true))
       checks.push({ label: 'Chain[0]: app key → derived key', ok: true, detail: `app: ${appPubkey.substring(0, 16)}...` })
-
-      if (chain.length > 1) {
-        // chain[1]: KMS root signs "dstack-kms-issued:" + appId + appPubkeyCompressed
-        // We just verify it's present for now; full KMS root check needs known root
-        checks.push({ label: 'Chain[1]: KMS → app key', ok: true, detail: 'present (root check requires known KMS pubkey)' })
-      }
-    } catch(e) {
-      checks.push({ label: 'Signature chain verification', ok: false, detail: e.message })
-    }
+      if (chain.length > 1) checks.push({ label: 'Chain[1]: KMS → app key', ok: true, detail: 'present (root check requires known KMS pubkey)' })
+    } catch(e) { checks.push({ label: 'Signature chain verification', ok: false, detail: e.message }) }
   }
-
-  el.innerHTML = checks.map(c =>
-    `<div class="field"><span class="${c.ok ? 'check' : 'fail'}">${c.ok ? '✓' : '✗'}</span> <span class="label">${c.label}:</span> ${c.detail}</div>`
-  ).join('')
+  el.innerHTML = checks.map(c => `<div class="field"><span class="${c.ok ? 'check' : 'fail'}">${c.ok ? '✓' : '✗'}</span> <span class="label">${c.label}:</span> ${c.detail}</div>`).join('')
 }
 
-function parseSignature(hexSig) {
-  const bytes = hexToBytes(hexSig)
-  return { sig: bytes.slice(0, 64), recovery: bytes[64] || 0 }
-}
-
-function hexToBytes(hex) {
-  hex = hex.replace(/^0x/, '')
-  const bytes = new Uint8Array(hex.length / 2)
-  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16)
-  return bytes
-}
-
-function bytesToHex(bytes) {
-  if (typeof bytes === 'string') return bytes
-  return Array.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).map(b => b.toString(16).padStart(2, '0')).join('')
-}
+function parseSignature(hexSig) { const bytes = hexToBytes(hexSig); return { sig: bytes.slice(0, 64), recovery: bytes[64] || 0 } }
+function hexToBytes(hex) { hex = hex.replace(/^0x/, ''); const b = new Uint8Array(hex.length / 2); for (let i = 0; i < b.length; i++) b[i] = parseInt(hex.substr(i * 2, 2), 16); return b }
+function bytesToHex(b) { if (typeof b === 'string') return b; return Array.from(b instanceof Uint8Array ? b : new Uint8Array(b)).map(x => x.toString(16).padStart(2, '0')).join('') }
 </script>
 </body></html>
