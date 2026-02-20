@@ -7,7 +7,7 @@ const { neon } = require('@neondatabase/serverless')
 const PORT = process.env.PORT || 8080
 const SOCK = '/var/run/dstack.sock'
 const STORE_PATH = '/data/store.enc'
-const JWT_SECRET = process.env.JWT_SECRET || 'devproof-demo-secret'
+const JWT_SECRET = process.env.JWT_SECRET || 'devproof-demo-secret' // TODO: change in production
 const DATABASE_URL = process.env.DATABASE_URL
 
 // --- dstack helpers ---
